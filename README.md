@@ -24,5 +24,7 @@ Our system integrates:
 This allows the robot to respond intelligently to visual cues (e.g., stop signs, hand gestures) and execute context-aware navigation without the need for cloud computation or external sensors.
 
 ---
+## Colab for RL trainning 
+https://colab.research.google.com/drive/1w5c69BxMfCnkBinFAr7S13GcAnJ9dKbK?usp=sharing#scrollTo=gU9NdsOlmczp
 
 ## 🧱 Project Structure

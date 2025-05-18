@@ -382,6 +382,24 @@ class ARSLearner(object):
                 logz.log_tabular("MaxRewardRollout", np.max(rewards))
                 logz.log_tabular("MinRewardRollout", np.min(rewards))
                 logz.log_tabular("timesteps", self.timesteps)
+                
+                # Add new metrics
+                g_hat = self.aggregate_rollouts()
+                update_norm = np.linalg.norm(g_hat)
+                logz.log_tabular("UpdateNorm", update_norm)  # Magnitude of policy updates
+                logz.log_tabular("LearningRate", self.step_size)  # Current learning rate
+                logz.log_tabular("DeltaStd", self.delta_std)  # Exploration parameter
+                logz.log_tabular("DeltasUsed", self.deltas_used)  # Number of directions used
+                logz.log_tabular("NumWorkers", self.num_workers)  # Number of parallel workers
+                
+                # Calculate and log success rate (rewards > 0)
+                success_rate = np.mean(rewards > 0)
+                logz.log_tabular("SuccessRate", success_rate)
+                
+                # Calculate and log improvement over previous best
+                improvement = mean_rewards - best_mean_rewards
+                logz.log_tabular("Improvement", improvement)
+                
                 logz.dump_tabular()
                 
             t1 = time.time()

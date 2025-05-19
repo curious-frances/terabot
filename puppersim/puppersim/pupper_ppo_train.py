@@ -151,6 +151,8 @@ class PPOTrainer:
         self.entropy_coef = entropy_coef
         self.gamma = gamma
         self.lam = lam
+        self.logdir = logdir
+        self.params = params
         
         # Initialize environment and policy
         env = create_pupper_env()
@@ -168,6 +170,9 @@ class PPOTrainer:
         if logdir:
             logz.configure_output_dir(logdir)
             logz.save_params(params)
+            
+        # Track best policy
+        self.best_mean_reward = float('-inf')
             
     def compute_advantages(self, rewards, values, next_value):
         advantages = []
@@ -241,10 +246,40 @@ class PPOTrainer:
             
             # Log metrics
             if (i + 1) % 10 == 0:
+                # Evaluate current policy
+                eval_rollouts = ray.get([worker.collect_rollout.remote() for worker in self.workers[:5]])  # Use 5 workers for evaluation
+                mean_reward = np.mean([np.sum(r['rewards']) for r in eval_rollouts])
+                
+                # Save latest policy
+                if self.logdir:
+                    torch.save(self.policy.state_dict(), os.path.join(self.logdir, 'policy_latest.pt'))
+                    # Also save as npz for consistency with ARS
+                    policy_data = {
+                        'weights': self.policy.state_dict(),
+                        'mu': torch.zeros(self.obs_dim),  # Placeholder for observation filter mean
+                        'std': torch.ones(self.obs_dim)   # Placeholder for observation filter std
+                    }
+                    torch.save(policy_data, os.path.join(self.logdir, 'policy_plus_latest.npz'))
+                
+                # Save best policy if better
+                if mean_reward > self.best_mean_reward:
+                    self.best_mean_reward = mean_reward
+                    if self.logdir:
+                        torch.save(self.policy.state_dict(), os.path.join(self.logdir, 'policy_best.pt'))
+                        # Also save as npz for consistency with ARS
+                        policy_data = {
+                            'weights': self.policy.state_dict(),
+                            'mu': torch.zeros(self.obs_dim),  # Placeholder for observation filter mean
+                            'std': torch.ones(self.obs_dim)   # Placeholder for observation filter std
+                        }
+                        torch.save(policy_data, os.path.join(self.logdir, f'policy_plus_best_{i+1}.npz'))
+                
                 logz.log_tabular("Iteration", i + 1)
                 logz.log_tabular("PolicyLoss", metrics['policy_loss'])
                 logz.log_tabular("ValueLoss", metrics['value_loss'])
                 logz.log_tabular("Entropy", metrics['entropy'])
+                logz.log_tabular("MeanReward", mean_reward)
+                logz.log_tabular("BestMeanReward", self.best_mean_reward)
                 logz.dump_tabular()
                 
             # Sync policy to workers
@@ -255,7 +290,12 @@ def run_ppo(params):
     dir_path = params['dir_path']
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
-    logdir = dir_path
+        
+    # Create timestamped directory for this run
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    logdir = os.path.join(dir_path, f"ppo_{timestamp}")
+    if not os.path.exists(logdir):
+        os.makedirs(logdir)
     
     try:
         import pybullet_envs

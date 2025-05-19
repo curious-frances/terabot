@@ -32,6 +32,8 @@ def create_pupper_env():
     gin.bind_parameter("scene_base.SceneBase.data_root", pd.getDataPath()+"/")
     gin.parse_config_file(_CONFIG_FILE)
     env = env_loader.load()
+    # Configure debug visualizer
+    env._pybullet_client.configureDebugVisualizer(COV_ENABLE_GUI, 1)
     return env
 
 def load_policy(policy_file, params):
@@ -82,7 +84,8 @@ def run_policy(policy, env, render=True, num_steps=1000):
     
     for _ in range(num_steps):
         if render:
-            env.render()
+            # PyBullet handles rendering automatically
+            pass
         
         action = policy.act(obs)
         obs, reward, done, _ = env.step(action)

@@ -26,37 +26,64 @@ from pybullet import COV_ENABLE_GUI
 import puppersim.data as pd
 import argparse
 
-def create_pupper_env():
+def create_pupper_env(args):
     CONFIG_DIR = puppersim.getPupperSimPath()
-    _CONFIG_FILE = os.path.join(CONFIG_DIR, "config", "pupper_pmtg.gin")
+    if args.run_on_robot:
+        _CONFIG_FILE = os.path.join(CONFIG_DIR, "config", "pupper_pmtg_robot.gin")
+    else:
+        _CONFIG_FILE = os.path.join(CONFIG_DIR, "config", "pupper_pmtg.gin")
     gin.bind_parameter("scene_base.SceneBase.data_root", pd.getDataPath()+"/")
     gin.parse_config_file(_CONFIG_FILE)
+    gin.bind_parameter("SimulationParameters.enable_rendering", args.render)
     env = env_loader.load()
-    # Configure debug visualizer
-    env._pybullet_client.configureDebugVisualizer(COV_ENABLE_GUI, 1)
+    env._pybullet_client.configureDebugVisualizer(COV_ENABLE_GUI, 0)
     return env
 
-def load_policy(policy_file, params):
-    """Load policy from file."""
+def main(argv):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--expert_policy_file', type=str, default="data/lin_policy_plus_latest.npz",
+                      help='relative path to the policy weights. Defaults to where ars_train outputs weight file.')
+    parser.add_argument('--num_rollouts', type=int, default=20,
+                      help='Number of expert rollouts. Default is 20.')
+    parser.add_argument('--json_file', type=str, default="data/params.json",
+                      help='relative path to the policy parameters file. Defaults to where ars_train outputs params file.')
+    parser.add_argument('--run_on_robot', action='store_true',
+                      help='whether to run the policy on the robot instead of in simulation. Default is False.')
+    parser.add_argument('--render', default=False, action='store_true',
+                      help='whether to render the robot. Default is False.')
+    parser.add_argument('--profile', default=False, action='store_true',
+                      help='whether to print timing for parts of the code. Default is False.')
+    parser.add_argument('--plot', default=False, action='store_true',
+                      help='whether to plot action and observation histories after running the policy.')
+    parser.add_argument("--log_to_file", default=False, action='store_true',
+                      help="Whether to log data to the disk.")
+    parser.add_argument("--realtime", default=False, help="Run at realtime.")
+    args = parser.parse_args(argv)
+
     print('loading and building expert policy')
+    with open(args.json_file) as f:
+        params = json.load(f)
+    print("params=", params)
     
-    # Load the policy weights
-    data = np.load(policy_file, allow_pickle=True)
+    data = np.load(args.expert_policy_file, allow_pickle=True)
+
+    print('create gym environment:', params["env_name"])
+    env = create_pupper_env(args)
+
     lst = data.files
     weights = data[lst[0]][0]
     mu = data[lst[0]][1]
+    print("mu=", mu)
     std = data[lst[0]][2]
-    
-    # Create environment to get dimensions
-    env = create_pupper_env()
+    print("std=", std)
+
     ob_dim = env.observation_space.shape[0]
     ac_dim = env.action_space.shape[0]
     ac_lb = env.action_space.low
     ac_ub = env.action_space.high
-    
-    # Set up policy parameters
+
     policy_params = {
-        'type': params['policy_type'],
+        'type': params["policy_type"],
         'ob_filter': params['filter'],
         'ob_dim': ob_dim,
         'ac_dim': ac_dim,
@@ -66,100 +93,93 @@ def load_policy(policy_file, params):
         'observation_filter_mean': mu,
         'observation_filter_std': std
     }
-    
-    # Add network size for neural network policy
-    if params['policy_type'] == 'nn':
-        policy_sizes_list = [int(item) for item in params['policy_network_size_list'].split(',')]
+
+    if params["policy_type"] == "nn":
+        print("FullyConnectedNeuralNetworkPolicy")
+        policy_sizes_string = params['policy_network_size_list'].split(',')
+        print("policy_sizes_string=", policy_sizes_string)
+        policy_sizes_list = [int(item) for item in policy_sizes_string]
+        print("policy_sizes_list=", policy_sizes_list)
         policy_params['policy_network_size'] = policy_sizes_list
         policy = FullyConnectedNeuralNetworkPolicy(policy_params, update_filter=False)
     else:
+        print("LinearPolicy2")
         policy = LinearPolicy2(policy_params, update_filter=False)
-    
-    return policy
+    policy.get_weights()
 
-def run_policy(policy, env, render=True, num_steps=1000):
-    """Run policy in environment."""
-    obs = env.reset()
-    total_reward = 0
-    steps = 0
+    returns = []
+    observations = []
     actions = []
-    rewards = []
-    
-    print("\nRunning policy...")
-    print("Press Ctrl+C to stop the simulation")
-    
-    try:
-        for step in range(num_steps):
-            if render:
-                # PyBullet handles rendering automatically
-                pass
-            
-            action = policy.act(obs)
-            actions.append(action)
-            
-            obs, reward, done, _ = env.step(action)
-            rewards.append(reward)
-            total_reward += reward
-            steps += 1
-            
-            if step % 100 == 0:
-                print(f"Step {step}: Current reward = {reward:.3f}, Total reward = {total_reward:.3f}")
-            
-            if done:
-                print(f"\nEpisode finished after {steps} steps")
-                break
-                
-    except KeyboardInterrupt:
-        print("\nSimulation stopped by user")
-    
-    # Print summary statistics
-    print("\nPolicy Execution Summary:")
-    print(f"Total steps: {steps}")
-    print(f"Total reward: {total_reward:.3f}")
-    print(f"Average reward per step: {total_reward/steps:.3f}")
-    if actions:
-        print(f"Action statistics:")
-        print(f"  Mean: {np.mean(actions, axis=0):.3f}")
-        print(f"  Std: {np.std(actions, axis=0):.3f}")
-    if rewards:
-        print(f"Reward statistics:")
-        print(f"  Mean: {np.mean(rewards):.3f}")
-        print(f"  Std: {np.std(rewards):.3f}")
-        print(f"  Min: {np.min(rewards):.3f}")
-        print(f"  Max: {np.max(rewards):.3f}")
-    
-    return total_reward
 
-def main(argv):
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--expert_policy_file', type=str, required=True,
-                      help='Path to the policy file (.npz for ARS, .pt for PPO)')
-    parser.add_argument('--json_file', type=str, required=True,
-                      help='Path to the parameters JSON file')
-    parser.add_argument('--render', action='store_true',
-                      help='Whether to render the environment')
-    parser.add_argument('--num_steps', type=int, default=1000,
-                      help='Number of steps to run the policy')
-    args = parser.parse_args(argv)
-    
-    # Load parameters
-    with open(args.json_file, 'r') as f:
-        params = json.load(f)
-    
-    # Add env_name if not present
-    if 'env_name' not in params:
-        params['env_name'] = 'PupperEnv-v0'
-    
-    print("params=", params)
-    
-    # Create environment
-    env = create_pupper_env()
-    
-    # Load and run policy
-    policy = load_policy(args.expert_policy_file, params)
-    total_reward = run_policy(policy, env, args.render, args.num_steps)
-    
-    print(f'Total reward: {total_reward}')
+    log_dict = {
+        't': [],
+        'IMU': [],
+        'MotorAngle': [],
+        'action': []
+    }
+
+    try:
+        obs = env.reset()
+        done = False
+        totalr = 0.
+        steps = 0
+        start_time_wall = time.time()
+        env_start_time_wall = time.time()
+        last_spammy_log = 0.0
+        
+        while not done or args.run_on_robot:
+            if args.realtime or args.run_on_robot:  # always run at realtime with real robot
+                # Sync to real time.
+                wall_elapsed = time.time() - env_start_time_wall
+                sim_elapsed = env.env_step_counter * env.env_time_step
+                sleep_time = sim_elapsed - wall_elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                elif sleep_time < -1 and time.time() - last_spammy_log > 1.0:
+                    print(f"Cannot keep up with realtime. {-sleep_time:.2f} sec behind, "
+                          f"sim/wall ratio {(sim_elapsed/wall_elapsed):.2f}.")
+                    last_spammy_log = time.time()
+
+            if args.profile:
+                print("loop dt:", time.time() - start_time_wall)
+            start_time_wall = time.time()
+            before_policy = time.time()
+            action = policy.act(obs)
+            after_policy = time.time()
+
+            if not args.run_on_robot:
+                observations.append(obs)
+                actions.append(action)
+
+            obs, r, done, _ = env.step(action)
+            if args.log_to_file:
+                log_dict['t'].append(env.robot.GetTimeSinceReset())
+                log_dict['MotorAngle'].append(obs[0:12])
+                log_dict['IMU'].append(obs[12:16])
+                log_dict['action'].append(action)
+
+            totalr += r
+            steps += 1
+            if args.profile:
+                print('policy.act(obs): ', after_policy - before_policy)
+                print('wallclock_control_code: ', time.time() - start_time_wall)
+        returns.append(totalr)
+    finally:
+        if args.log_to_file:
+            print("logging to file...")
+            with open("env_ars_log.txt", "wb") as f:
+                pickle.dump(log_dict, f)
+
+    print('returns: ', returns)
+    print('mean return: ', np.mean(returns))
+    print('std of return: ', np.std(returns))
+
+    if args.plot and not args.run_on_robot:
+        import matplotlib.pyplot as plt
+        action_history = np.array(actions)
+        observation_history = np.array(observations)
+        plt.plot(action_history)
+        plt.show()
 
 if __name__ == '__main__':
     import sys

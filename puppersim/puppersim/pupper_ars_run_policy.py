@@ -63,6 +63,11 @@ def main(argv):
     print('loading and building expert policy')
     with open(args.json_file) as f:
         params = json.load(f)
+    
+    # Add env_name if not present
+    if 'env_name' not in params:
+        params['env_name'] = 'PupperEnv-v0'
+    
     print("params=", params)
     
     data = np.load(args.expert_policy_file, allow_pickle=True)

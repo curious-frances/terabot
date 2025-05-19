@@ -4,6 +4,8 @@ Training script for quadruped robot that supports both ARS and PPO algorithms.
 
 import argparse
 import ray
+import os
+from datetime import datetime
 from pupper_ars_train import run_ars
 from pupper_ppo_train import run_ppo
 
@@ -16,6 +18,7 @@ def main():
     parser.add_argument('--n_iter', '-n', type=int, default=1000)
     parser.add_argument('--n_workers', '-e', type=int, default=32)
     parser.add_argument('--dir_path', type=str, default='data')
+    parser.add_argument('--env_name', type=str, default='PupperEnv-v0')
     
     # ARS-specific arguments
     parser.add_argument('--n_directions', '-nd', type=int, default=16)
@@ -42,6 +45,11 @@ def main():
     
     args = parser.parse_args()
     params = vars(args)
+    
+    # Create timestamped directory for this run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(params['dir_path'], f"{params['algorithm']}_{timestamp}")
+    params['dir_path'] = run_dir
     
     ray.init()
     assert ray.is_initialized()

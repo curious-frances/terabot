@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import os
 import glob
 from pathlib import Path
+import argparse
 
 def load_training_data(logdir):
     """Load training data from log directory."""
@@ -67,8 +68,8 @@ def load_training_data(logdir):
         'Improvement': improvements
     }
 
-def plot_training_metrics(logdir, save_dir=None):
-    """Plot various training metrics from ARS training."""
+def plot_training_metrics(logdir, save_dir=None, run_name=None):
+    """Plot various training metrics from training."""
     data = load_training_data(logdir)
     
     # Create separate plots for each metric
@@ -87,6 +88,12 @@ def plot_training_metrics(logdir, save_dir=None):
         'Improvement': ('Improvement', 'gray')
     }
     
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        if run_name:
+            save_dir = os.path.join(save_dir, run_name)
+            os.makedirs(save_dir, exist_ok=True)
+    
     for title, (metric, style) in metrics.items():
         plt.figure(figsize=(10, 6))
         plt.plot(data['iterations'], data[metric], style, label=title)
@@ -97,22 +104,59 @@ def plot_training_metrics(logdir, save_dir=None):
         plt.legend()
         
         if save_dir:
-            os.makedirs(save_dir, exist_ok=True)
             plt.savefig(os.path.join(save_dir, f'{title.lower().replace(" ", "_")}.png'))
         else:
             plt.show()
         plt.close()
 
+def list_available_runs(data_dir):
+    """List all available training runs in the data directory."""
+    runs = []
+    for run_dir in glob.glob(os.path.join(data_dir, "*_*")):
+        if os.path.isdir(run_dir) and os.path.exists(os.path.join(run_dir, "log.txt")):
+            run_name = os.path.basename(run_dir)
+            runs.append(run_name)
+    return sorted(runs)
+
 def main():
-    # Get the log directory from environment variable or use the correct data directory
-    script_dir = os.path.dirname(os.path.abspath(__file__))  # Get directory of this script
-    parent_dir = os.path.dirname(script_dir)  # Get parent directory (main puppersim)
-    logdir = os.getenv('ARS_LOG_DIR', os.path.join(parent_dir, 'data'))  # Use data directory in main puppersim
-    save_dir = os.getenv('PLOT_SAVE_DIR', os.path.join(parent_dir, 'plots'))
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_dir', type=str, default='data',
+                      help='Base directory containing training runs')
+    parser.add_argument('--run_name', type=str, default=None,
+                      help='Specific run to plot (e.g., ars_20250518_202225). If not specified, will list available runs.')
+    parser.add_argument('--save_dir', type=str, default='plots',
+                      help='Directory to save plots')
+    args = parser.parse_args()
     
+    if args.run_name is None:
+        # List available runs
+        runs = list_available_runs(args.data_dir)
+        if not runs:
+            print(f"No training runs found in {args.data_dir}")
+            return
+        
+        print("\nAvailable runs:")
+        for i, run in enumerate(runs):
+            print(f"{i+1}. {run}")
+        
+        # Ask user to select a run
+        while True:
+            try:
+                choice = int(input("\nEnter the number of the run to plot (or 0 to exit): "))
+                if choice == 0:
+                    return
+                if 1 <= choice <= len(runs):
+                    args.run_name = runs[choice-1]
+                    break
+                print("Invalid choice. Please try again.")
+            except ValueError:
+                print("Please enter a number.")
+    
+    # Plot the selected run
+    logdir = os.path.join(args.data_dir, args.run_name)
     try:
-        plot_training_metrics(logdir, save_dir)
-        print(f"Plots have been saved to {save_dir}")
+        plot_training_metrics(logdir, args.save_dir, args.run_name)
+        print(f"Plots have been saved to {os.path.join(args.save_dir, args.run_name)}")
     except Exception as e:
         print(f"Error plotting metrics: {str(e)}")
         print("\nAvailable files in log directory:")

@@ -37,12 +37,42 @@ def create_pupper_env():
 def load_policy(policy_file, params):
     """Load policy from file."""
     print('loading and building expert policy')
-    if params['policy_type'] == 'linear':
-        policy = LinearPolicy2(params)
-    else:
-        policy = FullyConnectedNeuralNetworkPolicy(params)
     
-    policy.load_weights(policy_file)
+    # Load the policy weights
+    data = np.load(policy_file, allow_pickle=True)
+    lst = data.files
+    weights = data[lst[0]][0]
+    mu = data[lst[0]][1]
+    std = data[lst[0]][2]
+    
+    # Create environment to get dimensions
+    env = create_pupper_env()
+    ob_dim = env.observation_space.shape[0]
+    ac_dim = env.action_space.shape[0]
+    ac_lb = env.action_space.low
+    ac_ub = env.action_space.high
+    
+    # Set up policy parameters
+    policy_params = {
+        'type': params['policy_type'],
+        'ob_filter': params['filter'],
+        'ob_dim': ob_dim,
+        'ac_dim': ac_dim,
+        'action_lower_bound': ac_lb,
+        'action_upper_bound': ac_ub,
+        'weights': weights,
+        'observation_filter_mean': mu,
+        'observation_filter_std': std
+    }
+    
+    # Add network size for neural network policy
+    if params['policy_type'] == 'nn':
+        policy_sizes_list = [int(item) for item in params['policy_network_size_list'].split(',')]
+        policy_params['policy_network_size'] = policy_sizes_list
+        policy = FullyConnectedNeuralNetworkPolicy(policy_params, update_filter=False)
+    else:
+        policy = LinearPolicy2(policy_params, update_filter=False)
+    
     return policy
 
 def run_policy(policy, env, render=True, num_steps=1000):

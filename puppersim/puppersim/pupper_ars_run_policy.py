@@ -81,18 +81,52 @@ def run_policy(policy, env, render=True, num_steps=1000):
     """Run policy in environment."""
     obs = env.reset()
     total_reward = 0
+    steps = 0
+    actions = []
+    rewards = []
     
-    for _ in range(num_steps):
-        if render:
-            # PyBullet handles rendering automatically
-            pass
-        
-        action = policy.act(obs)
-        obs, reward, done, _ = env.step(action)
-        total_reward += reward
-        
-        if done:
-            break
+    print("\nRunning policy...")
+    print("Press Ctrl+C to stop the simulation")
+    
+    try:
+        for step in range(num_steps):
+            if render:
+                # PyBullet handles rendering automatically
+                pass
+            
+            action = policy.act(obs)
+            actions.append(action)
+            
+            obs, reward, done, _ = env.step(action)
+            rewards.append(reward)
+            total_reward += reward
+            steps += 1
+            
+            if step % 100 == 0:
+                print(f"Step {step}: Current reward = {reward:.3f}, Total reward = {total_reward:.3f}")
+            
+            if done:
+                print(f"\nEpisode finished after {steps} steps")
+                break
+                
+    except KeyboardInterrupt:
+        print("\nSimulation stopped by user")
+    
+    # Print summary statistics
+    print("\nPolicy Execution Summary:")
+    print(f"Total steps: {steps}")
+    print(f"Total reward: {total_reward:.3f}")
+    print(f"Average reward per step: {total_reward/steps:.3f}")
+    if actions:
+        print(f"Action statistics:")
+        print(f"  Mean: {np.mean(actions, axis=0):.3f}")
+        print(f"  Std: {np.std(actions, axis=0):.3f}")
+    if rewards:
+        print(f"Reward statistics:")
+        print(f"  Mean: {np.mean(rewards):.3f}")
+        print(f"  Std: {np.std(rewards):.3f}")
+        print(f"  Min: {np.min(rewards):.3f}")
+        print(f"  Max: {np.max(rewards):.3f}")
     
     return total_reward
 

@@ -27,6 +27,8 @@ def main():
     parser.add_argument('--seed', type=int, default=37)
     parser.add_argument('--policy_type', type=str, default='linear')
     parser.add_argument('--filter', type=str, default='MeanStdFilter')
+    parser.add_argument('--policy_network_size_list', type=str, default='64,64')
+    parser.add_argument('--activation', type=str, default='tanh')
     
     # PPO-specific arguments
     parser.add_argument('--n_epochs', type=int, default=10)

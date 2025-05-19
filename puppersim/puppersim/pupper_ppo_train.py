@@ -124,6 +124,10 @@ class PPOWorker:
             'values': torch.stack(values).squeeze(),
             'log_probs': torch.stack(log_probs).squeeze()
         }
+    
+    def update_policy(self, policy_params):
+        self.policy.load_state_dict(policy_params)
+        return True
 
 class PPOTrainer:
     def __init__(self, 
@@ -245,7 +249,7 @@ class PPOTrainer:
                 
             # Sync policy to workers
             policy_params = ray.put(self.policy.state_dict())
-            ray.get([worker.policy.load_state_dict.remote(policy_params) for worker in self.workers])
+            ray.get([worker.update_policy.remote(policy_params) for worker in self.workers])
 
 def run_ppo(params):
     dir_path = params['dir_path']

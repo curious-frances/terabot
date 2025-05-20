@@ -248,7 +248,8 @@ class PPOTrainer:
             if (i + 1) % 10 == 0:
                 # Evaluate current policy
                 eval_rollouts = ray.get([worker.collect_rollout.remote() for worker in self.workers[:5]])  # Use 5 workers for evaluation
-                mean_reward = np.mean([np.sum(r['rewards']) for r in eval_rollouts])
+                # Convert rewards to numpy arrays before summing
+                mean_reward = np.mean([r['rewards'].cpu().numpy().sum() for r in eval_rollouts])
                 
                 # Save latest policy
                 if self.logdir:

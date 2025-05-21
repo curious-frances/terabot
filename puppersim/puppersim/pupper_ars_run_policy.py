@@ -16,22 +16,25 @@ import gin
 from pybullet import COV_ENABLE_GUI
 import puppersim.data as pd
 import argparse
+from puppersim.robot import PupperRobot
 
 def create_pupper_env(args):
-    # Import env_loader here to avoid pybullet_envs issues
-    from pybullet_envs.minitaur.envs_v2 import env_loader
-    
-    CONFIG_DIR = puppersim.getPupperSimPath()
     if args.run_on_robot:
-        _CONFIG_FILE = os.path.join(CONFIG_DIR, "config", "pupper_pmtg_robot.gin")
+        # Create robot environment directly
+        env = PupperRobot()
+        return env
     else:
+        # Import env_loader here to avoid pybullet_envs issues
+        from pybullet_envs.minitaur.envs_v2 import env_loader
+        
+        CONFIG_DIR = puppersim.getPupperSimPath()
         _CONFIG_FILE = os.path.join(CONFIG_DIR, "config", "pupper_pmtg.gin")
-    gin.bind_parameter("scene_base.SceneBase.data_root", pd.getDataPath()+"/")
-    gin.parse_config_file(_CONFIG_FILE)
-    gin.bind_parameter("SimulationParameters.enable_rendering", args.render)
-    env = env_loader.load()
-    env._pybullet_client.configureDebugVisualizer(COV_ENABLE_GUI, 0)
-    return env
+        gin.bind_parameter("scene_base.SceneBase.data_root", pd.getDataPath()+"/")
+        gin.parse_config_file(_CONFIG_FILE)
+        gin.bind_parameter("SimulationParameters.enable_rendering", args.render)
+        env = env_loader.load()
+        env._pybullet_client.configureDebugVisualizer(COV_ENABLE_GUI, 0)
+        return env
 
 def main(argv):
     parser = argparse.ArgumentParser()

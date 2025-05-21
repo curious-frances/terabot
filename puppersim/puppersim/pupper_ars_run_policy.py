@@ -13,21 +13,14 @@ import json
 import pickle
 import puppersim
 import gin
-from pybullet_envs.minitaur.envs_v2 import env_loader
 from pybullet import COV_ENABLE_GUI
 import puppersim.data as pd
 import argparse
 
-# Only import pybullet_envs if not running on robot
-import sys
-if '--run_on_robot' not in sys.argv:
-    import pybullet_envs
-    try:
-        import tds_environments
-    except:
-        pass
-
 def create_pupper_env(args):
+    # Import env_loader here to avoid pybullet_envs issues
+    from pybullet_envs.minitaur.envs_v2 import env_loader
+    
     CONFIG_DIR = puppersim.getPupperSimPath()
     if args.run_on_robot:
         _CONFIG_FILE = os.path.join(CONFIG_DIR, "config", "pupper_pmtg_robot.gin")

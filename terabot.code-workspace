@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "terabot",
+			"path": "."
+		},
+		{
+			"name": "train4",
+			"path": "../../../Downloads/class_yolo11_finetuned/runs/detect/train4"
+		}
+	],
+	"settings": {}
+}

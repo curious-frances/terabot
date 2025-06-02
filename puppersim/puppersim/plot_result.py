@@ -4,6 +4,7 @@ import os
 import glob
 from pathlib import Path
 import argparse
+import matplotlib as mpl
 
 def load_training_data(logdir):
     """Load training data from log directory."""
@@ -68,24 +69,61 @@ def load_training_data(logdir):
         'Improvement': improvements
     }
 
+def setup_publication_style():
+    """Configure matplotlib for publication-quality plots."""
+    plt.style.use('seaborn-whitegrid')
+    mpl.rcParams['font.family'] = 'sans-serif'
+    mpl.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans']
+    mpl.rcParams['font.weight'] = 'bold'
+    mpl.rcParams['axes.labelweight'] = 'bold'
+    mpl.rcParams['axes.titleweight'] = 'bold'
+    mpl.rcParams['font.size'] = 12
+    mpl.rcParams['axes.labelsize'] = 14
+    mpl.rcParams['axes.titlesize'] = 16
+    mpl.rcParams['xtick.labelsize'] = 12
+    mpl.rcParams['ytick.labelsize'] = 12
+    mpl.rcParams['legend.fontsize'] = 12
+    mpl.rcParams['figure.titlesize'] = 18
+    mpl.rcParams['axes.linewidth'] = 1.5
+    mpl.rcParams['lines.linewidth'] = 2
+    mpl.rcParams['grid.linewidth'] = 0.5
+    mpl.rcParams['grid.alpha'] = 0.3
+
 def plot_training_metrics(logdir, save_dir=None, run_name=None):
     """Plot various training metrics from training."""
     data = load_training_data(logdir)
+    setup_publication_style()
+    
+    # Define color scheme for better visibility
+    colors = {
+        'Average Reward': '#1f77b4',  # Blue
+        'Max Reward': '#d62728',      # Red
+        'Min Reward': '#2ca02c',      # Green
+        'Standard Deviation': '#7f7f7f',  # Gray
+        'Timesteps': '#9467bd',       # Purple
+        'Training Time': '#17becf',   # Cyan
+        'Update Norm': '#bcbd22',     # Yellow
+        'Learning Rate': '#8c564b',   # Brown
+        'Delta Std': '#e377c2',       # Pink
+        'Deltas Used': '#ff7f0e',     # Orange
+        'Success Rate': '#7f7f7f',    # Gray
+        'Improvement': '#17becf'      # Cyan
+    }
     
     # Create separate plots for each metric
     metrics = {
-        'Average Reward': ('AverageReward', 'b-'),
-        'Max Reward': ('MaxRewardRollout', 'r-'),
-        'Min Reward': ('MinRewardRollout', 'g-'),
-        'Standard Deviation': ('StdRewards', 'k-'),
-        'Timesteps': ('timesteps', 'm-'),
-        'Training Time': ('time', 'c-'),
-        'Update Norm': ('UpdateNorm', 'y-'),
-        'Learning Rate': ('LearningRate', 'purple'),
-        'Delta Std': ('DeltaStd', 'orange'),
-        'Deltas Used': ('DeltasUsed', 'brown'),
-        'Success Rate': ('SuccessRate', 'pink'),
-        'Improvement': ('Improvement', 'gray')
+        'Average Reward': ('AverageReward', colors['Average Reward']),
+        'Max Reward': ('MaxRewardRollout', colors['Max Reward']),
+        'Min Reward': ('MinRewardRollout', colors['Min Reward']),
+        'Standard Deviation': ('StdRewards', colors['Standard Deviation']),
+        'Timesteps': ('timesteps', colors['Timesteps']),
+        'Training Time': ('time', colors['Training Time']),
+        'Update Norm': ('UpdateNorm', colors['Update Norm']),
+        'Learning Rate': ('LearningRate', colors['Learning Rate']),
+        'Delta Std': ('DeltaStd', colors['Delta Std']),
+        'Deltas Used': ('DeltasUsed', colors['Deltas Used']),
+        'Success Rate': ('SuccessRate', colors['Success Rate']),
+        'Improvement': ('Improvement', colors['Improvement'])
     }
     
     if save_dir:
@@ -94,17 +132,39 @@ def plot_training_metrics(logdir, save_dir=None, run_name=None):
             save_dir = os.path.join(save_dir, run_name)
             os.makedirs(save_dir, exist_ok=True)
     
-    for title, (metric, style) in metrics.items():
-        plt.figure(figsize=(10, 6))
-        plt.plot(data['iterations'], data[metric], style, label=title)
-        plt.xlabel('Iteration')
-        plt.ylabel(title)
-        plt.title(f'{title} Over Training')
-        plt.grid(True)
-        plt.legend()
+    for title, (metric, color) in metrics.items():
+        plt.figure(figsize=(12, 8), dpi=300)
+        
+        # Plot main line
+        plt.plot(data['iterations'], data[metric], color=color, label=title, linewidth=2)
+        
+        # Add confidence interval for reward-related metrics
+        if 'Reward' in title:
+            plt.fill_between(data['iterations'],
+                           np.array(data[metric]) - np.array(data['StdRewards']),
+                           np.array(data[metric]) + np.array(data['StdRewards']),
+                           color=color, alpha=0.2)
+        
+        plt.xlabel('Iteration', fontweight='bold')
+        plt.ylabel(title, fontweight='bold')
+        plt.title(f'{title} Over Training', fontweight='bold', pad=20)
+        
+        # Customize grid
+        plt.grid(True, linestyle='--', alpha=0.7)
+        
+        # Add legend with better positioning
+        plt.legend(loc='best', frameon=True, framealpha=0.9)
+        
+        # Adjust layout
+        plt.tight_layout()
         
         if save_dir:
-            plt.savefig(os.path.join(save_dir, f'{title.lower().replace(" ", "_")}.png'))
+            # Save high-quality figure
+            plt.savefig(os.path.join(save_dir, f'{title.lower().replace(" ", "_")}.png'),
+                       dpi=300, bbox_inches='tight', pad_inches=0.1)
+            # Also save as PDF for publications
+            plt.savefig(os.path.join(save_dir, f'{title.lower().replace(" ", "_")}.pdf'),
+                       bbox_inches='tight', pad_inches=0.1)
         else:
             plt.show()
         plt.close()

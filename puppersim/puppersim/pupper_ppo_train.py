@@ -13,6 +13,7 @@ import torch.optim as optim
 from torch.distributions import Normal
 import ray
 from packaging import version
+import json
 
 import arspb.logz as logz
 import arspb.utils as utils
@@ -29,8 +30,21 @@ def create_pupper_env():
     env = env_loader.load()
     return env
 
+def load_ars_policy(ars_policy_path, params_path):
+    """Load ARS policy weights and parameters."""
+    with open(params_path) as f:
+        params = json.load(f)
+    
+    data = np.load(ars_policy_path, allow_pickle=True)
+    lst = data.files
+    weights = data[lst[0]][0]
+    mu = data[lst[0]][1]
+    std = data[lst[0]][2]
+    
+    return weights, mu, std, params
+
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim, action_dim, hidden_dim=64):
+    def __init__(self, obs_dim, action_dim, hidden_dim=64, ars_weights=None, obs_filter=None):
         super(ActorCritic, self).__init__()
         
         # Actor (Policy) Network
@@ -54,7 +68,25 @@ class ActorCritic(nn.Module):
         # Learnable standard deviation for action distribution
         self.log_std = nn.Parameter(torch.zeros(action_dim))
         
+        # Initialize with ARS weights if provided
+        if ars_weights is not None:
+            self.initialize_from_ars(ars_weights)
+            
+        # Observation filter
+        self.obs_filter = obs_filter
+        
+    def initialize_from_ars(self, ars_weights):
+        """Initialize policy network weights from ARS policy."""
+        # Convert ARS weights to PyTorch format and initialize actor network
+        with torch.no_grad():
+            # Assuming ARS weights are in the correct format
+            # You might need to adjust this based on your ARS policy structure
+            self.actor[0].weight.data = torch.FloatTensor(ars_weights[:self.actor[0].weight.shape[0], :self.actor[0].weight.shape[1]])
+            self.actor[0].bias.data = torch.FloatTensor(ars_weights[:self.actor[0].weight.shape[0], -1])
+            
     def forward(self, x):
+        if self.obs_filter is not None:
+            x = (x - self.obs_filter['mu']) / (self.obs_filter['std'] + 1e-8)
         return self.actor(x), self.critic(x)
     
     def get_action(self, obs, deterministic=False):
@@ -77,7 +109,7 @@ class ActorCritic(nn.Module):
 
 @ray.remote
 class PPOWorker:
-    def __init__(self, env_seed, policy_params=None):
+    def __init__(self, env_seed, policy_params=None, obs_filter=None):
         self.env = create_pupper_env()
         self.env.seed(env_seed)
         self.obs_dim = self.env.observation_space.shape[0]
@@ -85,7 +117,7 @@ class PPOWorker:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Initialize policy
-        self.policy = ActorCritic(self.obs_dim, self.action_dim).to(self.device)
+        self.policy = ActorCritic(self.obs_dim, self.action_dim, obs_filter=obs_filter).to(self.device)
         if policy_params is not None:
             self.policy.load_state_dict(policy_params)
             
@@ -141,7 +173,9 @@ class PPOTrainer:
                  gamma=0.99,
                  lam=0.95,
                  logdir=None,
-                 params=None):
+                 params=None,
+                 ars_policy_path=None,
+                 ars_params_path=None):
         
         self.num_workers = num_workers
         self.num_epochs = num_epochs
@@ -160,11 +194,18 @@ class PPOTrainer:
         self.action_dim = env.action_space.shape[0]
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        self.policy = ActorCritic(self.obs_dim, self.action_dim).to(self.device)
+        # Load ARS policy if provided
+        ars_weights = None
+        obs_filter = None
+        if ars_policy_path and ars_params_path:
+            ars_weights, mu, std, _ = load_ars_policy(ars_policy_path, ars_params_path)
+            obs_filter = {'mu': torch.FloatTensor(mu), 'std': torch.FloatTensor(std)}
+        
+        self.policy = ActorCritic(self.obs_dim, self.action_dim, ars_weights=ars_weights, obs_filter=obs_filter).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
         
         # Initialize workers
-        self.workers = [PPOWorker.remote(i) for i in range(num_workers)]
+        self.workers = [PPOWorker.remote(i, obs_filter=obs_filter) for i in range(num_workers)]
         
         # Setup logging
         if logdir:
@@ -173,6 +214,19 @@ class PPOTrainer:
             
         # Track best policy
         self.best_mean_reward = float('-inf')
+        
+        # Initialize metrics tracking
+        self.metrics = {
+            'policy_loss': [],
+            'value_loss': [],
+            'entropy': [],
+            'mean_reward': [],
+            'std_reward': [],
+            'max_reward': [],
+            'min_reward': [],
+            'learning_rate': [],
+            'timesteps': []
+        }
             
     def compute_advantages(self, rewards, values, next_value):
         advantages = []
@@ -236,6 +290,9 @@ class PPOTrainer:
         }
     
     def train(self, num_iterations):
+        start_time = time.time()
+        total_timesteps = 0
+        
         for i in range(num_iterations):
             # Collect rollouts from all workers
             rollout_ids = [worker.collect_rollout.remote() for worker in self.workers]
@@ -244,106 +301,98 @@ class PPOTrainer:
             # Update policy
             metrics = self.update_policy(rollouts[0])  # Using first worker's data for now
             
+            # Evaluate current policy
+            eval_rollouts = ray.get([worker.collect_rollout.remote() for worker in self.workers[:5]])
+            eval_rewards = [rollout['rewards'].sum().item() for rollout in eval_rollouts]
+            
+            # Update metrics
+            self.metrics['policy_loss'].append(metrics['policy_loss'])
+            self.metrics['value_loss'].append(metrics['value_loss'])
+            self.metrics['entropy'].append(metrics['entropy'])
+            self.metrics['mean_reward'].append(np.mean(eval_rewards))
+            self.metrics['std_reward'].append(np.std(eval_rewards))
+            self.metrics['max_reward'].append(np.max(eval_rewards))
+            self.metrics['min_reward'].append(np.min(eval_rewards))
+            self.metrics['learning_rate'].append(self.optimizer.param_groups[0]['lr'])
+            
+            # Update timesteps
+            total_timesteps += len(rollouts[0]['rewards'])
+            self.metrics['timesteps'].append(total_timesteps)
+            
             # Log metrics
             if (i + 1) % 10 == 0:
-                # Evaluate current policy
-                eval_rollouts = ray.get([worker.collect_rollout.remote() for worker in self.workers[:5]])  # Use 5 workers for evaluation
-                # Convert rewards to numpy arrays before summing
-                mean_reward = np.mean([r['rewards'].cpu().numpy().sum() for r in eval_rollouts])
-                
-                # Save latest policy
-                if self.logdir:
-                    torch.save(self.policy.state_dict(), os.path.join(self.logdir, 'policy_latest.pt'))
-                    # Also save as npz for consistency with ARS
-                    policy_data = {
-                        'weights': self.policy.state_dict(),
-                        'mu': torch.zeros(self.obs_dim),  # Placeholder for observation filter mean
-                        'std': torch.ones(self.obs_dim)   # Placeholder for observation filter std
-                    }
-                    torch.save(policy_data, os.path.join(self.logdir, 'policy_plus_latest.npz'))
-                
-                # Save best policy if better
-                if mean_reward > self.best_mean_reward:
-                    self.best_mean_reward = mean_reward
-                    if self.logdir:
-                        torch.save(self.policy.state_dict(), os.path.join(self.logdir, 'policy_best.pt'))
-                        # Also save as npz for consistency with ARS
-                        policy_data = {
-                            'weights': self.policy.state_dict(),
-                            'mu': torch.zeros(self.obs_dim),  # Placeholder for observation filter mean
-                            'std': torch.ones(self.obs_dim)   # Placeholder for observation filter std
-                        }
-                        torch.save(policy_data, os.path.join(self.logdir, f'policy_plus_best_{i+1}.npz'))
-                
                 logz.log_tabular("Iteration", i + 1)
+                logz.log_tabular("Time", time.time() - start_time)
+                logz.log_tabular("Timesteps", total_timesteps)
+                logz.log_tabular("MeanReward", np.mean(eval_rewards))
+                logz.log_tabular("StdReward", np.std(eval_rewards))
+                logz.log_tabular("MaxReward", np.max(eval_rewards))
+                logz.log_tabular("MinReward", np.min(eval_rewards))
                 logz.log_tabular("PolicyLoss", metrics['policy_loss'])
                 logz.log_tabular("ValueLoss", metrics['value_loss'])
                 logz.log_tabular("Entropy", metrics['entropy'])
-                logz.log_tabular("MeanReward", mean_reward)
-                logz.log_tabular("BestMeanReward", self.best_mean_reward)
                 logz.dump_tabular()
                 
-            # Sync policy to workers
-            policy_params = ray.put(self.policy.state_dict())
-            ray.get([worker.update_policy.remote(policy_params) for worker in self.workers])
+                # Save best policy
+                if np.mean(eval_rewards) > self.best_mean_reward:
+                    self.best_mean_reward = np.mean(eval_rewards)
+                    if self.logdir:
+                        torch.save(self.policy.state_dict(), 
+                                 os.path.join(self.logdir, 'best_policy.pt'))
+                        
+                # Save metrics for plotting
+                np.save(os.path.join(self.logdir, 'metrics.npy'), self.metrics)
 
 def run_ppo(params):
-    dir_path = params['dir_path']
-    if not os.path.exists(dir_path):
-        os.makedirs(dir_path)
-        
-    # Create timestamped directory for this run
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    logdir = os.path.join(dir_path, f"ppo_{timestamp}")
-    if not os.path.exists(logdir):
-        os.makedirs(logdir)
+    """Run PPO training with the given parameters."""
+    # Create log directory
+    logdir = os.path.join('data', 'ppo_' + time.strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(logdir, exist_ok=True)
     
-    try:
-        import pybullet_envs
-    except:
-        pass
-    try:
-        import tds_environments
-    except:
-        pass
-        
-    PPO = PPOTrainer(
-        num_workers=params['n_workers'],
-        num_epochs=params['n_epochs'],
-        batch_size=params['batch_size'],
-        clip_ratio=params['clip_ratio'],
-        value_coef=params['value_coef'],
-        entropy_coef=params['entropy_coef'],
-        learning_rate=params['learning_rate'],
-        gamma=params['gamma'],
-        lam=params['lam'],
+    # Initialize trainer
+    trainer = PPOTrainer(
+        num_workers=params.get('num_workers', 32),
+        num_epochs=params.get('num_epochs', 10),
+        batch_size=params.get('batch_size', 64),
+        clip_ratio=params.get('clip_ratio', 0.2),
+        value_coef=params.get('value_coef', 0.5),
+        entropy_coef=params.get('entropy_coef', 0.01),
+        learning_rate=params.get('learning_rate', 3e-4),
+        gamma=params.get('gamma', 0.99),
+        lam=params.get('lam', 0.95),
         logdir=logdir,
-        params=params
+        params=params,
+        ars_policy_path=params.get('ars_policy_path'),
+        ars_params_path=params.get('ars_params_path')
     )
     
-    PPO.train(params['n_iter'])
-    return
+    # Train
+    trainer.train(params.get('num_iterations', 1000))
+    
+    return logdir
 
-if __name__ == '__main__':
-    import argparse
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--n_iter', '-n', type=int, default=1000)
-    parser.add_argument('--n_workers', '-e', type=int, default=32)
-    parser.add_argument('--n_epochs', type=int, default=10)
-    parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--clip_ratio', type=float, default=0.2)
-    parser.add_argument('--value_coef', type=float, default=0.5)
-    parser.add_argument('--entropy_coef', type=float, default=0.01)
-    parser.add_argument('--learning_rate', type=float, default=3e-4)
-    parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--lam', type=float, default=0.95)
-    parser.add_argument('--dir_path', type=str, default='data')
+    parser.add_argument('--ars_policy_path', type=str, default=None,
+                      help='Path to ARS policy weights file')
+    parser.add_argument('--ars_params_path', type=str, default=None,
+                      help='Path to ARS parameters file')
+    parser.add_argument('--num_workers', type=int, default=32,
+                      help='Number of parallel workers')
+    parser.add_argument('--num_epochs', type=int, default=10,
+                      help='Number of epochs per update')
+    parser.add_argument('--batch_size', type=int, default=64,
+                      help='Batch size for updates')
+    parser.add_argument('--num_iterations', type=int, default=1000,
+                      help='Number of training iterations')
     args = parser.parse_args()
+    
+    # Initialize Ray
+    ray.init()
+    
+    # Set up parameters
     params = vars(args)
     
-    ray.init()
-    assert ray.is_initialized()
-    try:
-        run_ppo(params)
-    finally:
-        ray.shutdown() 
+    # Run training
+    logdir = run_ppo(params)
+    print(f"Training complete. Logs saved to {logdir}") 

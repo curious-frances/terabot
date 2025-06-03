@@ -1,0 +1,12 @@
+{"alpha"	:	0.2,
+"ars_params_path"	:	null,
+"ars_policy_path"	:	null,
+"auto_entropy"	:	false,
+"batch_size"	:	256,
+"buffer_size"	:	1000000,
+"gamma"	:	0.99,
+"learning_rate"	:	0.0003,
+"num_iterations"	:	1000,
+"num_workers"	:	64,
+"target_entropy"	:	null,
+"tau"	:	0.005}

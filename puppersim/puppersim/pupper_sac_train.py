@@ -31,6 +31,19 @@ def create_pupper_env():
     env = env_loader.load()
     return env
 
+def load_ars_policy(ars_policy_path, params_path):
+    """Load ARS policy weights and parameters."""
+    with open(params_path) as f:
+        params = json.load(f)
+    
+    data = np.load(ars_policy_path, allow_pickle=True)
+    lst = data.files
+    weights = data[lst[0]][0]
+    mu = data[lst[0]][1]
+    std = data[lst[0]][2]
+    
+    return weights, mu, std, params
+
 class RunningMeanStd:
     def __init__(self, epsilon=1e-4, shape=()):
         self.mean = np.zeros(shape, dtype=np.float64)

@@ -5,6 +5,100 @@ import glob
 from pathlib import Path
 import argparse
 import matplotlib as mpl
+import json
+
+class LogParser:
+    """Base class for log parsing."""
+    def __init__(self):
+        self.metrics = {}
+    
+    def parse_line(self, line):
+        """Parse a single line of log data."""
+        raise NotImplementedError
+    
+    def get_metrics(self):
+        """Return the parsed metrics."""
+        return self.metrics
+
+class LinearPolicyLogParser(LogParser):
+    """Parser for linear policy training logs."""
+    def __init__(self):
+        super().__init__()
+        self.metrics = {
+            'iterations': [],
+            'PolicyLoss': [],
+            'ValueLoss': [],
+            'Entropy': []
+        }
+    
+    def parse_line(self, line):
+        """Parse a linear policy log line."""
+        parts = line.strip().split('\t')
+        try:
+            if len(parts) >= 4:  # We expect at least 4 columns
+                self.metrics['iterations'].append(int(parts[0]))
+                self.metrics['PolicyLoss'].append(float(parts[1]))
+                self.metrics['ValueLoss'].append(float(parts[2]))
+                self.metrics['Entropy'].append(float(parts[3]))
+                return True
+        except (ValueError, IndexError):
+            pass
+        return False
+
+class PPOLogParser(LogParser):
+    """Parser for PPO training logs."""
+    def __init__(self):
+        super().__init__()
+        self.metrics = {
+            'iterations': [],
+            'PolicyLoss': [],
+            'ValueLoss': [],
+            'Entropy': [],
+            'AverageReward': [],
+            'StdRewards': []
+        }
+    
+    def parse_line(self, line):
+        """Parse a PPO log line."""
+        parts = line.strip().split('\t')
+        try:
+            self.metrics['iterations'].append(int(parts[0]))
+            self.metrics['PolicyLoss'].append(float(parts[1]))
+            self.metrics['ValueLoss'].append(float(parts[2]))
+            self.metrics['Entropy'].append(float(parts[3]))
+            if len(parts) > 4:
+                self.metrics['AverageReward'].append(float(parts[4]))
+                self.metrics['StdRewards'].append(float(parts[5]))
+            return True
+        except (ValueError, IndexError):
+            return False
+
+class ARSLogParser(LogParser):
+    """Parser for ARS training logs."""
+    def __init__(self):
+        super().__init__()
+        self.metrics = {
+            'iterations': [],
+            'AverageReward': [],
+            'StdRewards': [],
+            'MaxReward': [],
+            'MinReward': [],
+            'Timesteps': []
+        }
+    
+    def parse_line(self, line):
+        """Parse an ARS log line."""
+        parts = line.strip().split('\t')
+        try:
+            self.metrics['iterations'].append(int(parts[0]))
+            self.metrics['AverageReward'].append(float(parts[1]))
+            self.metrics['StdRewards'].append(float(parts[2]))
+            self.metrics['MaxReward'].append(float(parts[3]))
+            self.metrics['MinReward'].append(float(parts[4]))
+            self.metrics['Timesteps'].append(int(parts[5]))
+            return True
+        except (ValueError, IndexError):
+            return False
 
 def load_training_data(logdir):
     """Load training data from log directory."""
@@ -14,64 +108,44 @@ def load_training_data(logdir):
     
     print(f"Loading data from: {log_file}")
     
-    # Initialize lists to store metrics
-    time = []
-    iterations = []
-    avg_rewards = []
-    std_rewards = []
-    max_rewards = []
-    min_rewards = []
-    timesteps = []
-    update_norms = []
-    learning_rates = []
-    delta_stds = []
-    deltas_used = []
-    num_workers = []
-    success_rates = []
-    improvements = []
+    # Try different parsers
+    parsers = [LinearPolicyLogParser(), PPOLogParser(), ARSLogParser()]
+    successful_parser = None
     
-    # Read the log file
     with open(log_file, 'r') as f:
         # Skip header line
         next(f)
-        for line in f:
-            # Parse the line to extract metrics
-            parts = line.strip().split('\t')
-            time.append(float(parts[0]))
-            iterations.append(int(parts[1]))
-            avg_rewards.append(float(parts[2]))
-            std_rewards.append(float(parts[3]))
-            max_rewards.append(float(parts[4]))
-            min_rewards.append(float(parts[5]))
-            timesteps.append(int(parts[6]))
-            update_norms.append(float(parts[7]))
-            learning_rates.append(float(parts[8]))
-            delta_stds.append(float(parts[9]))
-            deltas_used.append(int(parts[10]))
-            num_workers.append(int(parts[11]))
-            success_rates.append(float(parts[12]))
-            improvements.append(float(parts[13]))
+        # Try each parser on the first few lines
+        for parser in parsers:
+            f.seek(0)
+            next(f)  # Skip header
+            success_count = 0
+            for _ in range(5):  # Try first 5 lines
+                line = next(f, None)
+                if line and parser.parse_line(line):
+                    success_count += 1
+            if success_count >= 3:  # If at least 3 lines parsed successfully
+                successful_parser = parser
+                break
     
-    return {
-        'time': time,
-        'iterations': iterations,
-        'AverageReward': avg_rewards,
-        'StdRewards': std_rewards,
-        'MaxRewardRollout': max_rewards,
-        'MinRewardRollout': min_rewards,
-        'timesteps': timesteps,
-        'UpdateNorm': update_norms,
-        'LearningRate': learning_rates,
-        'DeltaStd': delta_stds,
-        'DeltasUsed': deltas_used,
-        'NumWorkers': num_workers,
-        'SuccessRate': success_rates,
-        'Improvement': improvements
-    }
+    if not successful_parser:
+        raise ValueError("Could not determine log format")
+    
+    # Parse all lines with the successful parser
+    with open(log_file, 'r') as f:
+        next(f)  # Skip header
+        for line in f:
+            if not successful_parser.parse_line(line):
+                print(f"Warning: Skipping malformed line: {line.strip()}")
+    
+    return successful_parser.get_metrics()
 
 def setup_publication_style():
     """Configure matplotlib for publication-quality plots."""
-    plt.style.use('seaborn-whitegrid')
+    # Use a basic style that's guaranteed to exist
+    plt.style.use('default')
+    
+    # Configure the style manually
     mpl.rcParams['font.family'] = 'sans-serif'
     mpl.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans']
     mpl.rcParams['font.weight'] = 'bold'
@@ -88,6 +162,11 @@ def setup_publication_style():
     mpl.rcParams['lines.linewidth'] = 2
     mpl.rcParams['grid.linewidth'] = 0.5
     mpl.rcParams['grid.alpha'] = 0.3
+    
+    # Add grid
+    mpl.rcParams['axes.grid'] = True
+    mpl.rcParams['grid.linestyle'] = '--'
+    mpl.rcParams['grid.alpha'] = 0.3
 
 def plot_training_metrics(logdir, save_dir=None, run_name=None):
     """Plot various training metrics from training."""
@@ -97,34 +176,33 @@ def plot_training_metrics(logdir, save_dir=None, run_name=None):
     # Define color scheme for better visibility
     colors = {
         'Average Reward': '#1f77b4',  # Blue
-        'Max Reward': '#d62728',      # Red
-        'Min Reward': '#2ca02c',      # Green
-        'Standard Deviation': '#7f7f7f',  # Gray
-        'Timesteps': '#9467bd',       # Purple
-        'Training Time': '#17becf',   # Cyan
-        'Update Norm': '#bcbd22',     # Yellow
-        'Learning Rate': '#8c564b',   # Brown
-        'Delta Std': '#e377c2',       # Pink
-        'Deltas Used': '#ff7f0e',     # Orange
-        'Success Rate': '#7f7f7f',    # Gray
-        'Improvement': '#17becf'      # Cyan
+        'Policy Loss': '#d62728',     # Red
+        'Value Loss': '#2ca02c',      # Green
+        'Entropy': '#7f7f7f',         # Gray
+        'Max Reward': '#ff7f0e',      # Orange
+        'Min Reward': '#9467bd',      # Purple
+        'Timesteps': '#8c564b'        # Brown
     }
     
-    # Create separate plots for each metric
-    metrics = {
-        'Average Reward': ('AverageReward', colors['Average Reward']),
-        'Max Reward': ('MaxRewardRollout', colors['Max Reward']),
-        'Min Reward': ('MinRewardRollout', colors['Min Reward']),
-        'Standard Deviation': ('StdRewards', colors['Standard Deviation']),
-        'Timesteps': ('timesteps', colors['Timesteps']),
-        'Training Time': ('time', colors['Training Time']),
-        'Update Norm': ('UpdateNorm', colors['Update Norm']),
-        'Learning Rate': ('LearningRate', colors['Learning Rate']),
-        'Delta Std': ('DeltaStd', colors['Delta Std']),
-        'Deltas Used': ('DeltasUsed', colors['Deltas Used']),
-        'Success Rate': ('SuccessRate', colors['Success Rate']),
-        'Improvement': ('Improvement', colors['Improvement'])
-    }
+    # Create plots for available metrics
+    metrics = {}
+    if 'AverageReward' in data and len(data['AverageReward']) > 0:
+        metrics['Average Reward'] = ('AverageReward', colors['Average Reward'])
+    if 'PolicyLoss' in data and len(data['PolicyLoss']) > 0:
+        metrics['Policy Loss'] = ('PolicyLoss', colors['Policy Loss'])
+    if 'ValueLoss' in data and len(data['ValueLoss']) > 0:
+        metrics['Value Loss'] = ('ValueLoss', colors['Value Loss'])
+    if 'Entropy' in data and len(data['Entropy']) > 0:
+        metrics['Entropy'] = ('Entropy', colors['Entropy'])
+    if 'MaxReward' in data and len(data['MaxReward']) > 0:
+        metrics['Max Reward'] = ('MaxReward', colors['Max Reward'])
+    if 'MinReward' in data and len(data['MinReward']) > 0:
+        metrics['Min Reward'] = ('MinReward', colors['Min Reward'])
+    if 'Timesteps' in data and len(data['Timesteps']) > 0:
+        metrics['Timesteps'] = ('Timesteps', colors['Timesteps'])
+    
+    if not metrics:
+        raise ValueError("No valid metrics found in the log file")
     
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
@@ -138,8 +216,8 @@ def plot_training_metrics(logdir, save_dir=None, run_name=None):
         # Plot main line
         plt.plot(data['iterations'], data[metric], color=color, label=title, linewidth=2)
         
-        # Add confidence interval for reward-related metrics
-        if 'Reward' in title:
+        # Add confidence interval for reward
+        if metric == 'AverageReward' and 'StdRewards' in data and len(data['StdRewards']) > 0:
             plt.fill_between(data['iterations'],
                            np.array(data[metric]) - np.array(data['StdRewards']),
                            np.array(data[metric]) + np.array(data['StdRewards']),

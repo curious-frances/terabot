@@ -74,7 +74,7 @@ class RunningMeanStd:
         return (x - self.mean) / np.sqrt(self.var + 1e-8)
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim, action_dim, hidden_dims=[512, 256, 128], ars_weights=None, obs_filter=None):
+    def __init__(self, obs_dim, action_dim, hidden_dims=[512, 256, 128], obs_filter=None):
         super(ActorCritic, self).__init__()
         
         # Actor (Policy) Network
@@ -88,6 +88,7 @@ class ActorCritic(nn.Module):
             ])
             prev_dim = hidden_dim
         actor_layers.append(nn.Linear(prev_dim, action_dim))
+        actor_layers.append(nn.Tanh())  # Bound actions to [-1, 1]
         self.actor = nn.Sequential(*actor_layers)
         
         # Critic (Value) Network
@@ -106,19 +107,9 @@ class ActorCritic(nn.Module):
         # Learnable standard deviation for action distribution
         self.log_std = nn.Parameter(torch.zeros(action_dim))
         
-        # Initialize with ARS weights if provided
-        if ars_weights is not None:
-            self.initialize_from_ars(ars_weights)
-            
         # Observation filter
         self.obs_filter = obs_filter
         
-    def initialize_from_ars(self, ars_weights):
-        """Initialize policy network weights from ARS policy."""
-        with torch.no_grad():
-            self.actor[0].weight.data = torch.FloatTensor(ars_weights[:self.actor[0].weight.shape[0], :self.actor[0].weight.shape[1]])
-            self.actor[0].bias.data = torch.FloatTensor(ars_weights[:self.actor[0].weight.shape[0], -1])
-            
     def forward(self, x):
         if self.obs_filter is not None:
             x = (x - self.obs_filter['mu']) / (self.obs_filter['std'] + 1e-8)
@@ -198,19 +189,17 @@ class PPOWorker:
 
 class PPOTrainer:
     def __init__(self, 
-                 num_workers=64,  # Increased from 32
-                 num_epochs=20,   # Increased from 10
-                 batch_size=256,  # Increased from 64
-                 clip_ratio=0.1,  # Decreased from 0.2
+                 num_workers=64,
+                 num_epochs=20,
+                 batch_size=256,
+                 clip_ratio=0.1,
                  value_coef=0.5,
-                 entropy_coef=0.05,  # Increased from 0.01
-                 learning_rate=1e-4,  # Decreased from 3e-4
+                 entropy_coef=0.05,
+                 learning_rate=3e-4,
                  gamma=0.99,
                  lam=0.95,
                  logdir=None,
-                 params=None,
-                 ars_policy_path=None,
-                 ars_params_path=None):
+                 params=None):
         
         self.num_workers = num_workers
         self.num_epochs = num_epochs
@@ -232,19 +221,13 @@ class PPOTrainer:
         # Initialize observation normalization
         self.obs_rms = RunningMeanStd(shape=(self.obs_dim,))
         
-        # Load ARS policy if provided
-        ars_weights = None
-        obs_filter = None
-        if ars_policy_path and ars_params_path:
-            ars_weights, mu, std, _ = load_ars_policy(ars_policy_path, ars_params_path)
-            obs_filter = {'mu': torch.FloatTensor(mu), 'std': torch.FloatTensor(std)}
-        
-        self.policy = ActorCritic(self.obs_dim, self.action_dim, ars_weights=ars_weights, obs_filter=obs_filter).to(self.device)
+        # Initialize policy
+        self.policy = ActorCritic(self.obs_dim, self.action_dim).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
-        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=1000)  # Learning rate scheduler
+        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=1000)
         
         # Initialize workers
-        self.workers = [PPOWorker.remote(i, obs_filter=obs_filter) for i in range(num_workers)]
+        self.workers = [PPOWorker.remote(i) for i in range(num_workers)]
         
         # Setup logging
         if logdir:
@@ -254,19 +237,51 @@ class PPOTrainer:
         # Track best policy
         self.best_mean_reward = float('-inf')
         
-        # Initialize metrics tracking
+        # Enhanced metrics tracking
         self.metrics = {
+            # Training metrics
             'policy_loss': [],
             'value_loss': [],
             'entropy': [],
+            'learning_rate': [],
+            'gradient_norm': [],
+            'clip_fraction': [],
+            
+            # Performance metrics
             'mean_reward': [],
             'std_reward': [],
             'max_reward': [],
             'min_reward': [],
-            'learning_rate': [],
-            'timesteps': []
-        }
+            'episode_length': [],
+            'success_rate': [],
             
+            # Policy metrics
+            'action_mean': [],
+            'action_std': [],
+            'value_mean': [],
+            'value_std': [],
+            
+            # Stability metrics
+            'height_error': [],
+            'pitch_error': [],
+            'roll_error': [],
+            'joint_velocity': [],
+            
+            # Efficiency metrics
+            'energy_consumption': [],
+            'torque_usage': [],
+            
+            # Timing metrics
+            'timesteps': [],
+            'wall_time': [],
+            'update_time': [],
+            'rollout_time': []
+        }
+        
+        # Initialize time tracking
+        self.start_time = time.time()
+        self.last_update_time = self.start_time
+    
     def compute_advantages(self, rewards, values, next_value):
         advantages = []
         gae = 0
@@ -286,6 +301,8 @@ class PPOTrainer:
         return advantages, returns
     
     def update_policy(self, rollouts):
+        update_start_time = time.time()
+        
         obs = rollouts['observations']
         actions = rollouts['actions']
         old_values = rollouts['values']
@@ -300,7 +317,19 @@ class PPOTrainer:
             next_value = self.policy.critic(obs[-1].unsqueeze(0)).squeeze()
         advantages, returns = self.compute_advantages(rewards, old_values, next_value)
         
+        # Track policy statistics
+        self.metrics['action_mean'].append(actions.mean().item())
+        self.metrics['action_std'].append(actions.std().item())
+        self.metrics['value_mean'].append(old_values.mean().item())
+        self.metrics['value_std'].append(old_values.std().item())
+        
         # Update policy for multiple epochs
+        total_policy_loss = 0
+        total_value_loss = 0
+        total_entropy = 0
+        total_clip_fraction = 0
+        num_updates = 0
+        
         for _ in range(self.num_epochs):
             # Create mini-batches
             indices = np.random.permutation(len(obs))
@@ -319,22 +348,48 @@ class PPOTrainer:
                 # Compute value loss
                 value_loss = 0.5 * (values - returns[idx]).pow(2).mean()
                 
+                # Track clip fraction
+                clip_fraction = (ratio > (1 + self.clip_ratio)).float().mean() + \
+                               (ratio < (1 - self.clip_ratio)).float().mean()
+                
                 # Total loss
                 loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
                 
                 # Update policy
                 self.optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)  # Gradient clipping
+                
+                # Track gradient norm
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
+                self.metrics['gradient_norm'].append(grad_norm.item())
+                
                 self.optimizer.step()
                 
+                # Accumulate metrics
+                total_policy_loss += policy_loss.item()
+                total_value_loss += value_loss.item()
+                total_entropy += entropy.item()
+                total_clip_fraction += clip_fraction.item()
+                num_updates += 1
+        
         # Update learning rate
         self.scheduler.step()
-                
+        
+        # Compute average metrics
+        avg_policy_loss = total_policy_loss / num_updates
+        avg_value_loss = total_value_loss / num_updates
+        avg_entropy = total_entropy / num_updates
+        avg_clip_fraction = total_clip_fraction / num_updates
+        
+        # Track timing
+        update_time = time.time() - update_start_time
+        self.metrics['update_time'].append(update_time)
+        
         return {
-            'policy_loss': policy_loss.item(),
-            'value_loss': value_loss.item(),
-            'entropy': entropy.item()
+            'policy_loss': avg_policy_loss,
+            'value_loss': avg_value_loss,
+            'entropy': avg_entropy,
+            'clip_fraction': avg_clip_fraction
         }
     
     def train(self, num_iterations):
@@ -342,30 +397,82 @@ class PPOTrainer:
         total_timesteps = 0
         
         for i in range(num_iterations):
+            rollout_start_time = time.time()
+            
             # Collect rollouts from all workers
             rollout_ids = [worker.collect_rollout.remote() for worker in self.workers]
             rollouts = ray.get(rollout_ids)
             
+            # Track rollout time
+            rollout_time = time.time() - rollout_start_time
+            self.metrics['rollout_time'].append(rollout_time)
+            
             # Update policy
-            metrics = self.update_policy(rollouts[0])  # Using first worker's data for now
+            metrics = self.update_policy(rollouts[0])
             
             # Evaluate current policy
             eval_rollouts = ray.get([worker.collect_rollout.remote() for worker in self.workers[:5]])
-            eval_rewards = [rollout['rewards'].sum().item() for rollout in eval_rollouts]
+            
+            # Compute detailed evaluation metrics
+            eval_rewards = []
+            eval_lengths = []
+            eval_successes = []
+            eval_heights = []
+            eval_pitches = []
+            eval_rolls = []
+            eval_joint_velocities = []
+            eval_energies = []
+            
+            for rollout in eval_rollouts:
+                rewards = rollout['rewards']
+                observations = rollout['observations']
+                actions = rollout['actions']
+                
+                eval_rewards.append(rewards.sum().item())
+                eval_lengths.append(len(rewards))
+                eval_successes.append(rewards[-1] > 0)  # Success if final reward is positive
+                
+                # Extract stability metrics
+                heights = observations[:, 1]  # Height
+                pitches = observations[:, 2]  # Pitch
+                rolls = observations[:, 3]    # Roll
+                
+                eval_heights.append(heights.mean().item())
+                eval_pitches.append(pitches.mean().item())
+                eval_rolls.append(rolls.mean().item())
+                
+                # Compute joint velocities
+                joint_velocities = torch.diff(observations[:, 4:16], dim=0)
+                eval_joint_velocities.append(joint_velocities.abs().mean().item())
+                
+                # Compute energy consumption
+                energy = torch.sum(actions ** 2, dim=1).mean().item()
+                eval_energies.append(energy)
             
             # Update metrics
             self.metrics['policy_loss'].append(metrics['policy_loss'])
             self.metrics['value_loss'].append(metrics['value_loss'])
             self.metrics['entropy'].append(metrics['entropy'])
+            self.metrics['clip_fraction'].append(metrics['clip_fraction'])
+            self.metrics['learning_rate'].append(self.optimizer.param_groups[0]['lr'])
+            
             self.metrics['mean_reward'].append(np.mean(eval_rewards))
             self.metrics['std_reward'].append(np.std(eval_rewards))
             self.metrics['max_reward'].append(np.max(eval_rewards))
             self.metrics['min_reward'].append(np.min(eval_rewards))
-            self.metrics['learning_rate'].append(self.optimizer.param_groups[0]['lr'])
+            self.metrics['episode_length'].append(np.mean(eval_lengths))
+            self.metrics['success_rate'].append(np.mean(eval_successes))
             
-            # Update timesteps
+            self.metrics['height_error'].append(np.mean([abs(h - 0.15) for h in eval_heights]))
+            self.metrics['pitch_error'].append(np.mean([abs(p) for p in eval_pitches]))
+            self.metrics['roll_error'].append(np.mean([abs(r) for r in eval_rolls]))
+            self.metrics['joint_velocity'].append(np.mean(eval_joint_velocities))
+            self.metrics['energy_consumption'].append(np.mean(eval_energies))
+            
+            # Update timesteps and timing
             total_timesteps += len(rollouts[0]['rewards'])
             self.metrics['timesteps'].append(total_timesteps)
+            self.metrics['wall_time'].append(time.time() - start_time)
             
             # Log metrics
             if (i + 1) % 10 == 0:
@@ -376,9 +483,15 @@ class PPOTrainer:
                 logz.log_tabular("StdReward", np.std(eval_rewards))
                 logz.log_tabular("MaxReward", np.max(eval_rewards))
                 logz.log_tabular("MinReward", np.min(eval_rewards))
+                logz.log_tabular("SuccessRate", np.mean(eval_successes))
+                logz.log_tabular("EpisodeLength", np.mean(eval_lengths))
                 logz.log_tabular("PolicyLoss", metrics['policy_loss'])
                 logz.log_tabular("ValueLoss", metrics['value_loss'])
                 logz.log_tabular("Entropy", metrics['entropy'])
+                logz.log_tabular("ClipFraction", metrics['clip_fraction'])
+                logz.log_tabular("GradientNorm", np.mean(self.metrics['gradient_norm'][-10:]))
+                logz.log_tabular("HeightError", np.mean([abs(h - 0.15) for h in eval_heights]))
+                logz.log_tabular("EnergyConsumption", np.mean(eval_energies))
                 logz.dump_tabular()
                 
                 # Save best policy
@@ -390,11 +503,16 @@ class PPOTrainer:
                             'optimizer_state_dict': self.optimizer.state_dict(),
                             'scheduler_state_dict': self.scheduler.state_dict(),
                             'obs_rms': self.obs_rms,
-                            'best_reward': self.best_mean_reward
+                            'best_reward': self.best_mean_reward,
+                            'metrics': self.metrics
                         }, os.path.join(self.logdir, 'best_policy.pt'))
                         
                 # Save metrics for plotting
                 np.save(os.path.join(self.logdir, 'metrics.npy'), self.metrics)
+                
+                # Save detailed metrics to CSV
+                metrics_df = pd.DataFrame(self.metrics)
+                metrics_df.to_csv(os.path.join(self.logdir, 'detailed_metrics.csv'))
 
 def run_ppo(params):
     """Run PPO training with the given parameters."""
@@ -410,13 +528,11 @@ def run_ppo(params):
         clip_ratio=params.get('clip_ratio', 0.1),
         value_coef=params.get('value_coef', 0.5),
         entropy_coef=params.get('entropy_coef', 0.05),
-        learning_rate=params.get('learning_rate', 1e-4),
+        learning_rate=params.get('learning_rate', 3e-4),
         gamma=params.get('gamma', 0.99),
         lam=params.get('lam', 0.95),
         logdir=logdir,
-        params=params,
-        ars_policy_path=params.get('ars_policy_path'),
-        ars_params_path=params.get('ars_params_path')
+        params=params
     )
     
     # Train

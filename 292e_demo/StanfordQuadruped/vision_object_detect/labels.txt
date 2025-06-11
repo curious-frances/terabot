@@ -1,0 +1,6 @@
+chair
+desk
+door
+person
+wall
+whiteboard
